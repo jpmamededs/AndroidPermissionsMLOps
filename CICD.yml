@@ -1,0 +1,163 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  vmImage: ubuntu-latest
+
+stages:
+  - stage: Integration
+    displayName: Integration
+    jobs:
+      - job: Train
+        displayName: Train
+        steps:
+          - task: AzureCLI@3
+            displayName: Install Azure ML CLI
+            inputs:
+              connectionType: 'azureRM'
+              azureSubscription: 'AzResourceManager'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: 'az extension add -n ml'
+
+          - task: AzureCLI@3
+            displayName: Create Training Job
+            name: CreateJob
+            inputs:
+              connectionType: 'azureRM'
+              azureSubscription: 'AzResourceManager'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                JOB_NAME=$(az ml job create --file pipelines/job.yml --resource-group $(RESOURCE_GROUP) --workspace-name $(WORKSPACE_NAME) --query name -o tsv)
+                echo "Job created: $JOB_NAME"
+                echo "##vso[task.setvariable variable=JOB_NAME;isOutput=true]$JOB_NAME"
+
+          - task: AzureCLI@3
+            displayName: Wait for Job Completion
+            inputs:
+              connectionType: 'azureRM'
+              azureSubscription: 'AzResourceManager'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az ml job stream --name $(CreateJob.JOB_NAME) --resource-group $(RESOURCE_GROUP) --workspace-name $(WORKSPACE_NAME)
+
+          - task: AzureCLI@3
+            displayName: Register Model
+            inputs:
+              connectionType: 'azureRM'
+              azureSubscription: 'AzResourceManager'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az ml model create \
+                  --name android-permissions-model \
+                  --version $(Build.BuildId) \
+                  --path runs:/$(CreateJob.JOB_NAME)/model/ \
+                  --type mlflow_model \
+                  --resource-group $(RESOURCE_GROUP) \
+                  --workspace-name $(WORKSPACE_NAME)
+                
+                echo "Model registered: android-permissions-model:$(Build.BuildId)"
+
+  - stage: Deployment
+    displayName: Deployment
+    dependsOn: Integration
+    condition: succeeded()
+    jobs:
+    - job: WaitApproval
+      displayName: Wait for Approval
+      pool: server
+      steps:
+        - task: ManualValidation@0
+          timeoutInMinutes: 1440
+          inputs:
+            notifyUsers: 'joao.p.mamede.dias@avanade.com'
+            instructions: 'Review model metrics and approve or reject the deployment.'
+            onTimeout: 'reject'
+    - job: Deploy
+      displayName: Deploy
+      dependsOn: WaitApproval
+      steps:
+        - task: AzureCLI@3
+          displayName: Install Azure ML CLI
+          inputs:
+            connectionType: 'azureRM'
+            azureSubscription: 'AzResourceManager'
+            scriptType: 'bash'
+            scriptLocation: 'inlineScript'
+            inlineScript: 'az extension add -n ml'
+
+        - task: AzureCLI@3
+          displayName: Create or Update Endpoint
+          inputs:
+            connectionType: 'azureRM'
+            azureSubscription: 'AzResourceManager'
+            scriptType: 'bash'
+            scriptLocation: 'inlineScript'
+            inlineScript: |
+              if az ml online-endpoint show --name android-permissions-endpoint \
+                --resource-group $(RESOURCE_GROUP) \
+                --workspace-name $(WORKSPACE_NAME) 2>/dev/null; then
+                echo "Endpoint android-permissions-endpoint already exists"
+              else
+                echo "Creating endpoint android-permissions-endpoint"
+                az ml online-endpoint create \
+                  --name android-permissions-endpoint \
+                  --resource-group $(RESOURCE_GROUP) \
+                  --workspace-name $(WORKSPACE_NAME)
+              fi
+
+        - task: AzureCLI@3
+          displayName: Create or Update Deployment
+          inputs:
+            connectionType: 'azureRM'
+            azureSubscription: 'AzResourceManager'
+            scriptType: 'bash'
+            scriptLocation: 'inlineScript'
+            inlineScript: |
+              if az ml online-deployment show \
+                --name android-permissions-deployment \
+                --endpoint-name android-permissions-endpoint \
+                --resource-group $(RESOURCE_GROUP) \
+                --workspace-name $(WORKSPACE_NAME) 2>/dev/null; then
+                echo "Updating deployment android-permissions-deployment"
+                az ml online-deployment update \
+                  --file pipelines/deployment.yml \
+                  --resource-group $(RESOURCE_GROUP) \
+                  --workspace-name $(WORKSPACE_NAME)
+              else
+                echo "Creating deployment android-permissions-deployment"
+                az ml online-deployment create \
+                  --file pipelines/deployment.yml \
+                  --resource-group $(RESOURCE_GROUP) \
+                  --workspace-name $(WORKSPACE_NAME)
+              fi
+
+        - task: AzureCLI@3
+          displayName: Allocate Traffic
+          inputs:
+            connectionType: 'azureRM'
+            azureSubscription: 'AzResourceManager'
+            scriptType: 'bash'
+            scriptLocation: 'inlineScript'
+            inlineScript: |          
+              az ml online-endpoint update \
+                --name android-permissions-endpoint \
+                --traffic "android-permissions-deployment=100" \
+                --resource-group $(RESOURCE_GROUP) \
+                --workspace-name $(WORKSPACE_NAME)
+              
+              echo "Deployment completed successfully!"
+              echo "Endpoint: android-permissions-endpoint"
+              echo "Deployment: android-permissions-deployment"
+
+

@@ -1,0 +1,130 @@
+trigger:
+  branches:
+    include:
+      - master
+  paths:
+    include:
+      - infra/*
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  terraformVersion: '1.7.0'
+  workingDirectory: '$(System.DefaultWorkingDirectory)/infra'
+
+stages:
+  - stage: Validate
+    displayName: 'Terraform Validate'
+    jobs:
+      - job: Validate
+        displayName: 'Validate Terraform'
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Init & Validate'
+            inputs:
+              azureSubscription: 'AzResourceManager'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              workingDirectory: $(workingDirectory)
+              addSpnToEnvironment: true
+              inlineScript: |
+                export ARM_CLIENT_ID=$servicePrincipalId \
+                export ARM_CLIENT_SECRET=$servicePrincipalKey \
+                export ARM_TENANT_ID=$tenantId \
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv) \
+                terraform init \
+                terraform validate \
+
+          - script: |
+              cd $(workingDirectory)
+              if [ -f .terraform.lock.hcl ]; then
+                git config --global user.email "pipeline@azure.com"
+                git config --global user.name "Azure Pipeline"
+                git add .terraform.lock.hcl
+                git diff --staged --quiet || git commit -m "[skip ci] Update Terraform lock file"
+                git push origin HEAD:$(Build.SourceBranchName)
+              fi
+            displayName: 'Commit Terraform lock file'
+            condition: and(succeeded(), eq(variables['Build.Reason'], 'Manual'))
+
+  - stage: Plan
+    displayName: 'Terraform Plan'
+    dependsOn: Validate
+    jobs:
+      - job: Plan
+        displayName: 'Plan Infrastructure'
+        steps:
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform'
+            inputs:
+              terraformVersion: $(terraformVersion)
+
+          - task: AzureCLI@2
+            displayName: 'Terraform Plan'
+            inputs:
+              azureSubscription: 'AzResourceManager'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              workingDirectory: $(workingDirectory)
+              addSpnToEnvironment: true
+              inlineScript: |
+                export ARM_CLIENT_ID=$servicePrincipalId
+                export ARM_CLIENT_SECRET=$servicePrincipalKey
+                export ARM_TENANT_ID=$tenantId
+                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+                
+                terraform init
+                terraform plan -out=tfplan
+          
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Plan'
+            inputs:
+              targetPath: '$(workingDirectory)'
+              artifact: 'terraform-plan'
+              publishLocation: 'pipeline'
+
+  - stage: Apply
+    displayName: 'Terraform Apply'
+    dependsOn: Plan
+    jobs:
+      - deployment: Apply
+        displayName: 'Apply Infrastructure'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download Plan'
+                  inputs:
+                    artifact: 'terraform-plan'
+                    path: $(workingDirectory)
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform'
+                  inputs:
+                    terraformVersion: $(terraformVersion)
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Apply'
+                  inputs:
+                    azureSubscription: 'AzResourceManager'
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    workingDirectory: $(workingDirectory)
+                    addSpnToEnvironment: true
+                    inlineScript: |
+                      export ARM_CLIENT_ID=$servicePrincipalId
+                      export ARM_CLIENT_SECRET=$servicePrincipalKey
+                      export ARM_TENANT_ID=$tenantId
+                      export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+          
+                      chmod -R +x .terraform/providers/
+                      
+                      terraform apply -auto-approve tfplan

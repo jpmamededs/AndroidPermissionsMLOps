@@ -1,0 +1,21 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+
+experiment_name: mlops-experiment
+display_name: Model training using MLOps practices
+description: Training job with MLFlow in Azure ML
+
+code: ../src
+
+command: >-
+  python train.py --data_path ${{inputs.data_path}}
+
+inputs:
+  data_path:
+    type: uri_file
+    path: azureml:android-permissions-v2@latest
+
+environment:
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu20.04
+  conda_file: ../environment.yml
+
+compute: azureml:cpu-cluster
