@@ -80,7 +80,7 @@ stages:
         - task: ManualValidation@0
           timeoutInMinutes: 1440
           inputs:
-            notifyUsers: 'joao.p.mamede.dias@avanade.com'
+            notifyUsers: ''
             instructions: 'Review model metrics and approve or reject the deployment.'
             onTimeout: 'reject'
     - job: Deploy
