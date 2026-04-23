@@ -1,8 +1,8 @@
 import json
-import joblib
+import os
 import pandas as pd
+import mlflow.pyfunc
 
-# Variável global para armazenar o modelo
 model = None
 
 
@@ -10,10 +10,8 @@ def init():
 
     global model
     
-    model_path = "model.pkl"
-    model = joblib.load(model_path)
-
-
+    model_path = os.path.join(os.environ.get("AZUREML_MODEL_DIR"), "model")
+    model = mlflow.pyfunc.load_model(model_path)
 
 def run(raw_data):
     
